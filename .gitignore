@@ -1,0 +1,18 @@
+# Results are produced by the entry-point scripts
+social_planner_results/
+market_exposure_results/
+green_social_planner_results/
+green_h2_social_planner_results/
+me_contracts_results/
+
+# Julia
+*.jl.cov
+*.jl.mem
+.julia/
+deps/
+
+# Editor and OS
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp

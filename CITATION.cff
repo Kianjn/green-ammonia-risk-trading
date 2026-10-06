@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use this model, please cite the accompanying paper and this repository."
+title: "Multi-agent equilibrium model of coupled electricity, hydrogen, certificate, and ammonia markets"
+type: software
+authors:
+  - family-names: Jafarinejad
+    given-names: Kian
+    email: K.Jafarinejad@tudelft.nl
+    affiliation: Delft University of Technology
+repository-code: "https://github.com/REPLACE_WITH_OWNER/REPLACE_WITH_REPO"
+license: MIT
+year: 2026
+# Replace the block below with the paper once it has a DOI.
+# preferred-citation:
+#   type: article
+#   title: "Paper title"
+#   authors:
+#     - family-names: Jafarinejad
+#       given-names: Kian
+#   year: 2026
+#   doi: "10.xxxx/xxxxx"

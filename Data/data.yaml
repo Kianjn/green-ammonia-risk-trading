@@ -1,0 +1,356 @@
+# ==============================================================================
+# data.yaml — Central configuration for all agents, markets, and ADMM settings
+# ==============================================================================
+
+# ---------------------------------------------------------------------------
+# General: Temporal dimensions and reference year
+# ---------------------------------------------------------------------------
+# NOTE ON SOURCES: parameters tagged [NL] are calibrated to Dutch reality; the
+# bracketed tag points to the source documented in docs/TECHNICAL.md
+# (Calibration). Values without a [NL] tag are modeling
+# choices/numerical settings, not empirical NL data. Ammonia (the end product)
+# uses LHV 18.6 MJ/kg ⇒ 5.167 MWh_EP per tonne NH₃ for all €/t ↔ €/MWh_EP and
+# Mt ↔ TWh conversions. [LHV]
+General:
+  nTimesteps: 24       # Hours per representative day (24 = hourly resolution; standard for power-system models)
+  nReprDays: 8         # Number of representative days (8 for finer temporal resolution and H2 price analysis)
+  nYears: 1            # Fallback scenario count when the Scenarios block below is absent
+  base_year: 2025      # [NL] Calibration year for installed capacities / costs (CBS 2025 nader voorlopig; fuel/market 2024). Not a file label — scenario files are timeseries_1..n.
+  # Multiplier on solar and wind FixedCost_per_MW, applied once after YAML load (before any run).
+  # 1.0 keeps the €/MW-year values as written; 0.5 halves both agents.
+  VRES_FixedCost_Scale: 1.0
+
+# ---------------------------------------------------------------------------
+# Scenarios: the uncertainty grid every risk-aware agent optimises over
+# ---------------------------------------------------------------------------
+# The scenario set is the full cross product of a weather year and a gas-price
+# level, so nYears = length(weather_years) × length(gas_price_multipliers) = 15.
+# Scenario jy is ordered gas-fastest:
+#   jy = (weather_index − 1) × 3 + gas_index
+# so jy = 1,2,3 are weather year 1 at 1.0/2.0/3.0 × gas, jy = 4,5,6 are weather
+# year 2, and so on. All 15 carry equal probability 1/15 (independent uniform
+# priors over weather and gas). See docs/TECHNICAL.md (Uncertainty set).
+#
+# weather_years are file labels: label L reads Input/timeseries_<L>.csv and
+# Input/output_<L>/. The five labels were chosen by a max-min diversity search
+# over ten candidate ERA5 years under one common NL calibration. The files in
+# Input/ are the inputs the solver reads; how they were built is in
+# docs/TECHNICAL.md.
+Scenarios:
+  weather_years: [1, 2, 3, 4, 5]
+  gas_price_multipliers: [1.00, 2.00, 3.00]
+
+# ---------------------------------------------------------------------------
+# Fuel: the single source of truth for every fuel- and carbon-linked cost
+# ---------------------------------------------------------------------------
+# Nothing downstream hardcodes a marginal cost for a fuel-burning technology.
+# Each conventional plant and the grey offtaker's ammonia cost are DERIVED from
+# these prices via explicit efficiencies and emission factors, so a gas-price
+# scenario propagates to power and ammonia consistently.
+#
+# Why this matters: ammonia SMR consumes ~32 GJ_LHV of gas per tonne NH₃
+# (≈1.72 MWh_th per MWh_EP at 5.167 MWh/t [LHV]), and a 58%-efficient CCGT
+# consumes 1/0.58 = 1.72 MWh_th per MWh_e. Grey ammonia and gas-fired power have
+# essentially identical gas exposure per MWh, so they must move together.
+Fuel:
+  GasPrice:  34.40     # [NL] €/MWh_th — TTF 2024 annual average [TTF-2024]
+  CoalPrice: 12.54     # €/MWh_th — API2 2024 average ≈102 €/t ÷ 8.14 MWh_th/t [API2-2024]
+  BiomassPrice: 33.00  # €/MWh_th — NW-Europe industrial wood pellet 2024 ≈156 €/t ÷ 4.72 MWh_th/t [PELLET-2024]
+  CO2Price:  64.79     # [NL] €/tCO₂ — EU-ETS EUA 2024 annual average [ETS-2024]
+  GasEmissionFactor:     0.2016  # tCO₂/MWh_th — natural gas (56.1 kg/GJ) [IPCC-EF]
+  CoalEmissionFactor:    0.3406  # tCO₂/MWh_th — hard coal (94.6 kg/GJ) [IPCC-EF]
+  BiomassEmissionFactor: 0.0     # tCO₂/MWh_th — ETS zero-rated
+
+# ---------------------------------------------------------------------------
+# ADMM: Alternating Direction Method of Multipliers global settings
+# ---------------------------------------------------------------------------
+ADMM:
+  rho_initial: 1.0      # Standard starting penalty weight for the augmented Lagrangian; 1.0 is a neutral default that avoids biasing toward primal or dual convergence
+  rho_cap_initial: 0.1  # Unused for investment: installed capacity is a private variable. See docs/TECHNICAL.md.
+  nScenarioYears: 15    # Fallback only — the Scenarios block above is authoritative and yields 5 weather × 3 gas = 15
+  max_iter: 5000        # Iteration budget
+  epsilon: 0.2          # Flow-market Boyd ε_abs (MW per slot) for market_exposure AND me_contracts; L2 tol = ε_abs·√n_slots. See docs/TECHNICAL.md.
+  epsilon_cap: 5.0      # [me_contracts] Contract-volume tolerance (MW): |C_sell − ΣC_buy| ≤ ε_cap and dual ≤ ε_cap per link (scalar, no √n). Unused by ME.
+  rho_contract_max: 0.5 # [me_contracts] Upper bound on the per-link contract ρ (€/MWh per MW); residual balancing adapts ρ between 1e-4 and this.
+  # γ=0.5 with β in {0.2, 0.4, 0.6, 0.8}: Hoschle mix; current β is the sweep point.
+  gamma: 0.5             # Risk weight (γ=1 ⇒ risk-neutral; γ=0.5 ⇒ risk-averse Hoschle-style). SP + ADMM read this block.
+  # CVaR confidence β (Rockafellar–Uryasev); higher β = more risk-averse at γ<1.
+  # Tail (1−β) must span at least one of the 15 equiprobable scenarios (6.7%),
+  # so β ≤ 0.933. The sweep 0.2/0.4/0.6/0.8 gives tails of 12/9/6/3 years.
+  # See docs/TECHNICAL.md.
+  beta: 0.6
+
+# ---------------------------------------------------------------------------
+# SocialPlanner: solver configuration for social_planner.jl only
+# Full justification for ipopt_tol (1e-6): docs/TECHNICAL.md (Social planner).
+# ---------------------------------------------------------------------------
+SocialPlanner:
+  solver: ipopt         # Social-planner solver ("ipopt" recommended; "gurobi" optional). ADMM continues to use Gurobi.
+  ipopt_tol: 1.0e-6     # IPOPT KKT tolerance — see docs/TECHNICAL.md (typical electricity prices imply sub-cent/MWh error).
+  ipopt_max_iter: 5000  # IPOPT iteration cap for SP solve.
+  ipopt_print_level: 0  # 0 = silent; 3–5 = IPOPT iteration log.
+  risk_warmstart: true  # When gamma<1: solve gamma=1 first, copy dispatch/capacity, reseat CVaR. Needed so IPOPT does not die in restoration.
+  # risk_warmstart_beta: 0.8  # Defaults to ADMM.beta. Auxiliary solve is gamma=1 so beta does not change the primal.
+  ipopt_mu_strategy: "adaptive"  # Barrier update; more robust on the social CVaR QCP than monotone.
+  # ipopt_retry_tol: 1.0e-5       # If first solve fails (social_planner.jl default).
+  # ipopt_retry_max_iter: 8000    # Retry iteration cap (social_planner.jl default).
+
+# ---------------------------------------------------------------------------
+# PartialPlanners: merged green agents for partial social planner ADMM cases
+# Used by green_h2_social_planner.jl and green_social_planner.jl only.
+# Member IDs must match blocks in Power / Hydrogen / Hydrogen_Offtaker below.
+# ---------------------------------------------------------------------------
+PartialPlanners:
+  GreenH2:
+    coalition_id: GreenH2_Coalition
+    members:
+      electrolyzer: Prod_H2_Green
+      green_offtaker: Offtaker_Green
+  Green:
+    coalition_id: Green_Coalition
+    members:
+      solar: Gen_VRES_Solar
+      wind: Gen_VRES_Wind
+      electrolyzer: Prod_H2_Green
+      green_offtaker: Offtaker_Green
+
+# ---------------------------------------------------------------------------
+# Market initial prices and penalty weights
+# Each market has:
+#   initial_price — Scalar seed for the 3D ADMM price array λ[jh,jd,jy].
+#                   Chosen as a reasonable starting guess to help ADMM converge
+#                   faster by starting near equilibrium. If social planner results
+#                   are available, the mean prices will be used to ensure warm-start.
+#   rho_initial   — Per-market ADMM penalty parameter; balances convergence
+#                   speed vs. oscillation. Lower values for markets needing
+#                   gentler convergence (e.g. GC markets with smaller volumes).
+# ---------------------------------------------------------------------------
+elec_market:
+  initial_price: 77.0   # €/MWh — Warm-start near the NL 2024 day-ahead average (77.29) and the derived CCGT SRMC (83.3) [NL-DA-2024]
+  rho_initial: 1.0      # Penalty weight for electricity; 1.0 matches the global default (largest, most liquid market)
+elec_GC_market:
+  initial_price: 3.0    # €/MWh_GC — Warm-start near realistic GoO clearing (abundant VRES ⇒ low premium)
+  rho_initial: 0.3      # Lower penalty: GC market has smaller volumes & price ranges; gentler convergence avoids oscillation
+H2_market:
+  initial_price: 128.0  # €/MWh_H2 (~4.3 €/kg) — Warm-start at electrolysis cost: 1.5 MWh_e/MWh_H2 × ~83 €/MWh + 3 €/MWh_H2 O&M
+  rho_initial: 0.5      # Moderate penalty: H2 market is tightly coupled to electricity through the electrolyzer
+H2_GC_market:
+  initial_price: 25.0    # €/MWh_GC — Warm-start near green-H2 certificate value under the 42% mandate
+  rho_initial: 1.0       # Moderate penalty: needs stronger consensus pressure than a thin annual market
+
+# ---------------------------------------------------------------------------
+# EP (End-Product) market — Coordination market for ammonia / downstream product
+# ---------------------------------------------------------------------------
+EP_market:
+  # [NL] Ammonia end product. NL nitrogen-fertiliser ammonia capacity ≈ 3 Mt NH₃/yr:
+  #   Yara Sluiskil ≈ 1.8 Mt + OCI Nitrogen Geleen ≈ 1.2 Mt [PBL-2019; Yara-NL].
+  #   3 Mt/yr × 5.167 MWh/t [LHV] ≈ 15.5 TWh_EP/yr.
+  #   Price seed = grey MC (85.7) + the H₂-GC mandate pass-through
+  #   (gamma_GC/gamma_NH3 × λ_H2_GC ≈ 0.56 × 25) ≈ 100 €/MWh_EP ≈ 517 €/t NH₃,
+  #   consistent with the 2024 NW Europe ammonia average of ≈528–581 $/t [OCI-NH3-2024].
+  initial_price: 100.0      # [NL] €/MWh_EP — warm-start at grey marginal cost plus GC mandate cost
+  rho_initial: 3.0          # Larger penalty: EP market is stiff (few participants, large price swings) and needs stronger coupling
+  Demand_Column: "LOAD_EP"  # Column in the timeseries CSV that holds the normalized EP demand profile (inelastic)
+  Total_Demand: 1970.0      # [NL] Scales D_EP; annual EP ≈ Total_Demand × Σ W[jd]×LOAD_EP ≈ 15.5 TWh/y (≈3 Mt NH₃/y) [PBL-2019]
+# ---------------------------------------------------------------------------
+# Power-sector agents
+# ---------------------------------------------------------------------------
+# Solar/wind FixedCost_per_MW are multiplied by General.VRES_FixedCost_Scale
+# (default 1.0) once after YAML load, before any run.
+Power:
+  # NL 2025 aggregate VRES (CBS installed capacity, MWp/MW; baseline scenario = label 1).
+  # Variable Renewable Energy Source (solar — national aggregate)
+  Gen_VRES_Solar:
+    Type: "VRES"
+    Capacity: 25881.0         # [NL] MW — CBS installed solar PV at end-2025 nader voorlopig (25,881 MWp) [CBS-RE]
+    Profile_Column: "SOLAR"    # Column in timeseries CSV with hourly capacity factors (0–1) for this VRES unit
+    MarginalCost: 0.0          # €/MWh — Zero marginal cost: no fuel; incentivises full dispatch whenever available
+    FixedCost_per_MW: 95000.0  # [NL] €/MW-year — NL utility solar ≈0.79 M€/MW CAPEX+FOM, 25 yr, 8% WACC ⇒ LCOE ≈50 €/MWh [IRENA-2024]. Multiplied by General.VRES_FixedCost_Scale before the run.
+    gamma: 0.5                   # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
+    beta: 0.6                 # CVaR confidence β (Rockafellar–Uryasev); higher = more risk-averse at gamma<1 (§4.10.4).
+
+  # Variable Renewable Energy Source (wind — national aggregate, on+offshore)
+  Gen_VRES_Wind:
+     Type: "VRES"
+     Capacity: 11782.0          # [NL] MW — CBS installed wind at end-2025 nader voorlopig (11,782 MW, on+offshore) [CBS-RE]
+     Profile_Column: "WIND"     # Column in timeseries CSV with hourly capacity factors (0–1) for this VRES unit
+     MarginalCost: 0.0          # €/MWh — Zero marginal cost: no fuel; incentivises full dispatch whenever available
+     FixedCost_per_MW: 185000.0 # [NL] €/MW-year — NL offshore-leaning wind ≈2.2 M€/MW CAPEX+FOM ⇒ LCOE ≈62 €/MWh [IRENA-2024]. Multiplied by General.VRES_FixedCost_Scale before the run.
+     gamma: 0.5                   # Risk weight for CVaR (γ=1 ⇒ risk-neutral even though risk terms are present structurally).
+     beta: 0.6                # CVaR confidence β (Rockafellar–Uryasev); higher = more risk-averse at gamma<1 (§4.10.4).
+
+  # Dispatchable conventional fleet — three flat merit-order plants (NL 2024/25)
+  # Total capacity 18,000 MW = 14,040 CCGT + 1,800 coal + 2,160 biomass (78/10/12%
+  # of fossil fleet, matching 2024 generation shares). Each plant has constant SRMC
+  # per scenario; merit order emerges from the electricity market price λ_elec.
+  Gen_Conv_CCGT:
+    Type: "Conventional"
+    Capacity: 14040.0       # [NL] MW — 78% of 18 GW fossil proxy [CBS-EP]
+    Technology:
+      {name: "CCGT", fuel: "Gas", efficiency: 0.58, vom: 1.5}  # [NL] dominant modern NL CCGT fleet [IEA-WEO]
+
+  Gen_Conv_Coal:
+    Type: "Conventional"
+    Capacity: 1800.0        # [NL] MW — 10% hard-coal steam residual [CBS-EP]
+    Technology:
+      {name: "Coal", fuel: "Coal", efficiency: 0.42, vom: 3.0}
+
+  Gen_Conv_Biomass:
+    Type: "Conventional"
+    Capacity: 2160.0        # [NL] MW — 12% co-fired/dedicated biomass; ETS zero-rated [CBS-EP]
+    Technology:
+      {name: "Biomass", fuel: "Biomass", efficiency: 0.38, vom: 3.0}
+
+  # At 2024 fuel prices (gas 34.40, CO₂ 64.79) derived SRMCs are
+  #     CCGT 83.3  <  coal 85.4  <  biomass 89.8  €/MWh_e.
+  # The 2×/3× gas scenarios lift only CCGT (to 142.6 and 202.0 €/MWh_e),
+  # reordering merit vs coal/biomass without a monotonicity constraint.
+  # OCGT peaking (~128 €/MWh_e at base gas) is omitted as a separate agent.
+
+  # Electricity consumer with elastic (quadratic) demand — NL national load
+  # Quadratic utility: U(d) = A_E·d − ½·B_E·d²  →  inverse demand p(d) = A_E − B_E·d
+  Cons_Elec_01:
+    Type: "Consumer"
+    PeakLoad: 19500.0        # [NL] MW — NL system peak 19.48 GW (ENTSO-E 2024); annual load ≈109 TWh/y (2024 net consumption) [CBS-EP]
+    Load_Column: "LOAD_E"    # Column in timeseries CSV with the normalized electricity load profile
+    A_E: 500.0               # €/MWh — Intercept of inverse demand (high ⇒ near-inelastic short-run elec demand); modeling choice, not NL price
+    B_E: 0.0025              # €/MWh² — Slope scaled for ~20 GW peak (was 0.5 at 55 MW); keeps demand near-inelastic at system scale
+
+# ---------------------------------------------------------------------------
+# Hydrogen producers (electrolysis)
+# ---------------------------------------------------------------------------
+Hydrogen:
+  Prod_H2_Green:
+    Type: "GreenProducer"
+    # Nameplate is electrical INPUT (IEA / project convention: GW_e, USD/kWe).
+    # Implied H₂ output = Capacity_Electrolyzer / SpecificConsumption = 800/1.5 = 533.3 MW_H2.
+    # Endogenous JuMP capacity is H₂ output; CAPEX is converted to €/MW_H2-year in code.
+    Capacity_Electrolyzer: 800.0              # [NL] MW_e — seed ≈ green NH₃ share of NL nameplate [PBL-2019]
+    Capacity_H2_Output: 533.333333            # MW_H2 — MUST equal Capacity_Electrolyzer / SpecificConsumption
+    SpecificConsumption: 1.5                  # [NL] MWh_e per MWh_H2 (η≈67% LHV) [IEA-H2]
+    OperationalCost: 3.0                       # €/MWh_H2 — stack/water variable O&M; engineering estimate
+    # [NL] IEA GHR 2024 Assumptions annex: installed CAPEX 2160 USD/kWe (global avg 2023) [IEA-H2-2024].
+    # 2160 × 0.92 €/USD = 1.987 M€/MW_e. CRF(8%, 20 yr)=0.10185 + 3% FOM (IEA) ⇒ 262 k€/MW_e-yr.
+    FixedCost_per_MW_Electrolyzer: 262000.0   # [NL] €/MW_e-year — IEA kWe CAPEX annualised [IEA-H2-2024]
+    gamma: 0.5                                  # Risk weight for CVaR (γ=1 ⇒ risk-neutral baseline).
+    beta: 0.6                                # CVaR confidence level τ.
+
+# ---------------------------------------------------------------------------
+# Hydrogen offtakers (downstream processors & importers)
+# ---------------------------------------------------------------------------
+Hydrogen_Offtaker:
+  # Green offtaker — converts H2 into end product using only green hydrogen
+  Offtaker_Green:
+    Type: "GreenOfftaker"
+    # Haber–Bosch nameplate is PRODUCT output (t NH₃/y or MW_EP), not H₂ feed [PBL-2019].
+    # H₂ intake is implied: Capacity_H2_In = Capacity_EP_Out / Alpha = 400/0.75 = 533.3 MW_H2.
+    Capacity_EP_Out: 400.0             # [NL] MW_EP — seed ≈20% of NL ammonia nameplate via electrolysis [PBL-2019]
+    Capacity_H2_In: 533.333333         # MW_H2 — MUST equal Capacity_EP_Out / Alpha (not a second nameplate)
+    Alpha: 0.75                        # [NL] MWh_EP per MWh_H2; ≈70–80% Haber–Bosch LHV [H2EU-2023]
+    ProcessingCost: 12.0               # €/MWh_EP (≈62 €/t) — HB + ASU + compression variable O&M; engineering estimate
+    # IEA 770 USD/(t NH₃/y) for synthesis loop + ASU, excluding electrolyser [IEA-NH3-2024].
+    # 770 × 0.92 €/USD × 8760 / 5.167 MWh/t = 1.201 M€/MW_EP; CRF+3% FOM ⇒ 158 k€/MW_EP-yr.
+    FixedCost_per_MW_EP_Out: 158000.0  # [NL] €/MW_EP-year — Haber–Bosch+ASU annuity [IEA-NH3-2024]
+    gamma: 0.5                           # Risk weight for CVaR (γ=1 ⇒ risk-neutral baseline).
+    beta: 0.6                         # CVaR confidence level τ.
+
+  # Grey offtaker — uses conventional (grey) hydrogen but must buy H2 GCs for a fraction of its implied H2 use
+  Offtaker_Grey:
+    Type: "GreyOfftaker"
+    Capacity: 1570.0          # [NL] MW_EP — product nameplate; ≈80% of NL ammonia (domestic SMR) [PBL-2019]
+    # [NL] Grey ammonia variable cost is DERIVED from the Fuel block, not hardcoded:
+    #     MC = GasIntensity × gas_price + CO2Intensity × CO₂_price + VariableOM
+    # At the 2024 base prices this gives 1.720×34.40 + 0.348×64.79 + 4.0
+    #   = 59.2 (gas) + 22.5 (CO₂) + 4.0 (O&M) = 85.7 €/MWh_EP ≈ 443 €/t NH₃.
+    # Validation: ammonia NW Europe averaged $528–581/t in 2024 [OCI-NH3-2024],
+    # i.e. European producers sat near cash cost after the 2022–23 spike normalised.
+    # Grey is the marginal EP supplier, so its MC effectively sets the ammonia price.
+    # The 2×/3× gas scenarios lift it to 144.9 and 204.1 €/MWh_EP.
+    GasIntensity: 1.720       # [NL] MWh_th NG per MWh_EP — 32 GJ_LHV/t NH₃ ÷ 5.167 MWh/t [FE-BAT; DECHEMA-2030]
+    CO2Intensity: 0.348       # [NL] tCO₂ per MWh_EP — 1.8 tCO₂/t NH₃ (process + fuel) ÷ 5.167 MWh/t [FE-BAT]
+    VariableOM: 4.0           # €/MWh_EP (≈21 €/t) — catalysts, chemicals, variable maintenance; engineering estimate
+    gamma_NH3: 0.75           # [NL] EP→H2 ratio (MWh_EP/MWh_H2); implied H2 use = EP/gamma_NH3 for the 42% mandate [H2EU-2023]
+
+  # EP importer — disabled for now (domestic supply only)
+  Offtaker_Import:
+    Type: "EPImporter"
+    Capacity: 0.0             # MW_EP — imports disabled (per user); all ammonia met by green + grey offtakers
+    ImportCost: 250.0         # €/MWh_EP (~1290 €/t) — import landed cost; inactive at zero capacity, kept for re-enabling later
+
+# ---------------------------------------------------------------------------
+# Electricity Guarantees-of-Origin (GC) demand agent
+# Quadratic utility: U(d) = A_GC·d − ½·B_GC·d²  →  inverse demand p(d) = A_GC − B_GC·d
+# (Same functional form as the electricity consumer, applied to GC certificates)
+# ---------------------------------------------------------------------------
+Electricity_GC_Demand:
+  Demand_GC_Elec_01:
+    Type: "GC_Demand"
+    # [NL] Voluntary Guarantees-of-Origin (GoO) demand from green-power buyers; tracks the power load.
+    # Rescaled to NL system size: with the old A_GC/B_GC the demand curve hit zero at ~157 MW
+    # (negligible vs a ~25 TWh GC market) so the GC price collapsed. New slope keeps demand
+    # meaningful across the full ~18 GW range while clearing at realistic GoO prices (a few €/MWh) [GoO].
+    PeakLoad: 17500.0         # [NL] MW_GC — most NL consumption seeks green certification (~18 GW, near system load) [CBS-EP]
+    Load_Column: "LOAD_E"     # GoO demand follows the electricity load profile
+    A_GC: 10.0                # €/MWh_GC — max WTP for green premium; near recent EU GoO peak [GoO] (modeling intercept)
+    B_GC: 0.0005              # €/MWh_GC² — slope scaled to ~18 GW (p>0 up to ~20 GW); modeling choice
+
+# ---------------------------------------------------------------------------
+# EP Demand — Currently empty: EP demand is inelastic and fully defined by
+# EP_market.Total_Demand × normalized profile. This block is a placeholder
+# for future elastic (if any) EP demand agents.
+# ---------------------------------------------------------------------------
+EP_Demand: {}
+
+# ---------------------------------------------------------------------------
+# PPAs — Power Purchase Agreements (VRES → electrolyzer). Used by me_contracts.jl.
+#
+# ONE standard contract type: a bilateral, fixed-price, pay-as-produced PPA on
+# an agreed capacity. For every VRES v there is one contract link:
+#   C_ppa,v  (MW)     contracted capacity, ≤ the VRES plant size; chosen by the
+#                     seller (offer) and the buyer (demand) in their own QPs and
+#                     cleared by ADMM (C_sell = Σ C_buy).
+#   K_ppa,v  (€/MWh)  fixed price on the bundled green electricity (elec + elec-GC);
+#                     the ADMM dual of the volume-clearing condition.
+# The electrolyzer pays the VRES K on the contracted energy AF·C. Both keep
+# dispatching in the spot pools, so the QP adds the incremental cash
+#   Π_y = Σ_{h,d} W[d,y]·(K − λ_elec − λ_elec_GC)·AF_v·C
+# to the buyer's loss and subtracts it from the seller's (inside both CVaRs).
+# That is the fixed-price slice, not a payment from outside the model.
+#
+# initial_price: "spot" → K starts at the risk-neutral fair value (volume-
+#                weighted expected bundled spot on AF_v at the λ warm start);
+#                a number overrides it. Per-VRES override: <id>.initial_price.
+# rho_initial:   ADMM penalty on the contract-volume consensus, (ρ/2)·A·(C−C̄)²
+#                with A = expected MWh per MW-year; K moves by η·ρ·(C_sell−ΣC_buy).
+# ---------------------------------------------------------------------------
+PPAs:
+  initial_price: spot
+  rho_initial: 0.02
+  Gen_VRES_Solar:
+    initial_price: spot
+  Gen_VRES_Wind:
+    initial_price: spot
+
+# ---------------------------------------------------------------------------
+# HPAs — Hydrogen Purchase Agreements (electrolyzer → green offtaker). Used by me_contracts.jl.
+#
+# ONE standard contract type: a bilateral, fixed-price, baseload HPA on an
+# agreed capacity. For every electrolyzer h there is one contract link:
+#   C_hpa,h  (MW_H2)   contracted capacity, ≤ the electrolyzer's H₂ output
+#                      capacity (seller) and ≤ the offtaker's H₂ intake (buyer);
+#                      cleared by ADMM (C_sell = Σ C_buy).
+#   K_hpa,h  (€/MWh_H2) fixed price on the bundled green hydrogen (H₂ + H₂-GC);
+#                      the ADMM dual of the volume-clearing condition.
+# The offtaker pays the electrolyzer K on C every hour. Both keep dispatching
+# in the spot pools, so the QP adds the incremental cash
+#   Π_y = Σ_{h,d} W[d,y]·(K − λ_H2 − λ_H2_GC)·C
+# to the offtaker's loss and subtracts it from the electrolyzer's.
+#
+# initial_price / rho_initial: as for PPAs (fair value at the λ warm start; ρ
+# on the contract-volume consensus). Per-electrolyzer override: <id>.initial_price.
+# ---------------------------------------------------------------------------
+HPAs:
+  initial_price: spot
+  rho_initial: 0.02
+  Prod_H2_Green:
+    initial_price: spot
