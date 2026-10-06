@@ -70,7 +70,7 @@ Weather and gas prices make profit random. For a capacity owner the loss in scen
 Rockafellar and Uryasev (2000):
 
 $$
-\mathrm{CVaR}_{\beta}(\ell)=\min_{\alpha}\left\{\alpha+\frac{1}{1-\beta}\mathbb{E}\bigl[(\ell-\alpha)_{+}\bigr]\right\}.
+\mathrm{CVaR}_{\beta}(\ell)=\min_{\alpha}\left\lbrace\alpha+\frac{1}{1-\beta}\mathbb{E}\bigl[(\ell-\alpha)_{+}\bigr]\right\rbrace.
 $$
 
 In code this is linear: shortfall $u_y\ge \ell_y-\alpha$, and $\mathrm{CVaR}\ge \alpha+\frac{1}{1-\beta}\sum_y P_y u_y$.
